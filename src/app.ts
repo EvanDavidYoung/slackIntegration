@@ -1,134 +1,140 @@
 import { App } from "@slack/bolt";
 import OpenAI from "openai";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import path from "path";
 
-const TRANSCRIPTION_API_BASE = "TRANSCRIPTION_API_BASE_PLACEHOLDER";
-const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY ?? "";
+const MODEL = "Qwen/Qwen3-8B";
+const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
 const llm = new OpenAI({
   baseURL: "VLLM_BASE_URL_PLACEHOLDER",
   apiKey: process.env.VLLM_API_KEY ?? "",
 });
 
-const MODEL = "Qwen/Qwen3-8B";
+// ---------- MCP client ----------
 
-const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
-  {
-    type: "function",
+let mcpClient: Client;
+let mcpTools: OpenAI.Chat.ChatCompletionTool[] = [];
+
+async function initMcp() {
+  const serverScript = path.resolve(__dirname, "..", "mcp-server", "server.ts");
+  const tsNode = path.resolve(__dirname, "..", "node_modules", ".bin", "ts-node");
+
+  const transport = new StdioClientTransport({
+    command: tsNode,
+    args: [serverScript],
+    env: { ...process.env } as Record<string, string>,
+  });
+
+  mcpClient = new Client({ name: "slack-bot", version: "1.0.0" });
+  await mcpClient.connect(transport);
+
+  const { tools } = await mcpClient.listTools();
+  mcpTools = tools.map((t) => ({
+    type: "function" as const,
     function: {
-      name: "create_transcript",
-      description: "Transcribe a podcast from a URL",
-      parameters: {
-        type: "object",
-        properties: {
-          url: { type: "string", description: "Direct audio URL to transcribe" },
-        },
-        required: ["url"],
-      },
+      name: t.name,
+      description: t.description ?? "",
+      parameters: t.inputSchema as Record<string, unknown>,
     },
-  },
-];
+  })) as OpenAI.Chat.ChatCompletionTool[];
 
-const PORT = parseInt(process.env.PORT ?? "3000", 10);
+  console.log(`MCP ready — tools: ${tools.map((t) => t.name).join(", ")}`);
+}
+
+// ---------- Agent ----------
+
+type AgentResult =
+  | { type: "text"; content: string }
+  | { type: "transcript"; jobId: string; data: unknown }
+  | { type: "error"; message: string };
+
+async function runAgent(
+  message: string,
+  onToolCall?: (toolName: string) => void
+): Promise<AgentResult> {
+  const completion = await llm.chat.completions.create({
+    model: MODEL,
+    tools: mcpTools,
+    tool_choice: "auto",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a podcast assistant. If the user provides a URL and asks for a transcript, call the create_transcript tool. Otherwise, reply helpfully in plain text.",
+      },
+      { role: "user", content: message },
+    ],
+  });
+
+  const msg = completion.choices[0].message;
+
+  if (!msg.tool_calls?.length) {
+    return { type: "text", content: msg.content ?? "I'm not sure how to help with that." };
+  }
+
+  const toolCall = msg.tool_calls[0] as {
+    function: { name: string; arguments: string };
+  };
+  const toolName = toolCall.function.name;
+  const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+
+  onToolCall?.(toolName);
+
+  const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
+  const content = result.content as Array<{ type: string; text?: string }>;
+  const resultText = content[0]?.type === "text" ? (content[0].text ?? "") : "";
+
+  if (result.isError) {
+    return { type: "error", message: resultText };
+  }
+
+  if (toolName === "create_transcript") {
+    const { job_id, transcript } = JSON.parse(resultText) as {
+      job_id: string;
+      transcript: unknown;
+    };
+    return { type: "transcript", jobId: job_id, data: transcript };
+  }
+
+  return { type: "text", content: resultText };
+}
+
+// ---------- Slack ----------
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
 });
 
-async function runTranscription(
-  url: string,
-  userId: string,
-  channel: string,
-  say: (msg: string) => Promise<unknown>,
-  client: App["client"]
-) {
-  await say(`Got it! Starting the transcription for that podcast. This may take a few minutes. <@${userId}>`);
-
-  const response = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/url`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${TRANSCRIPTION_API_KEY}`,
-    },
-    body: JSON.stringify({ url }),
-  });
-
-  if (!response.ok) {
-    console.error(`Transcription API error: ${response.status} ${response.statusText}`);
-    await say(`Sorry <@${userId}>, I couldn't start the transcription. Please try again.`);
-    return;
-  }
-
-  const job = await response.json() as { job_id: string; status: string };
-  console.log(`Job submitted — id: ${job.job_id}, status: ${job.status}`);
-
-  const POLL_INTERVAL_MS = 15_000;
-  const MAX_POLLS = 40; // 10 minutes max
-
-  for (let i = 0; i < MAX_POLLS; i++) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-
-    const statusRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/status/${job.job_id}`, {
-      headers: { Authorization: `Bearer ${TRANSCRIPTION_API_KEY}` },
-    });
-    const { status, error } = await statusRes.json() as { status: string; error?: string };
-    console.log(`Poll ${i + 1}: ${status}`);
-
-    if (status === "error") {
-      await say(`Sorry <@${userId}>, the transcription failed: ${error ?? "unknown error"}`);
-      return;
-    }
-
-    if (status === "completed") {
-      const resultRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/result/${job.job_id}`, {
-        headers: { Authorization: `Bearer ${TRANSCRIPTION_API_KEY}` },
-      });
-      const result = await resultRes.json();
-      await client.files.uploadV2({
-        channel_id: channel,
-        content: JSON.stringify(result, null, 2),
-        filename: `transcript-${job.job_id}.json`,
-        initial_comment: `Transcription complete! <@${userId}>`,
-      });
-      return;
-    }
-  }
-
-  await say(`Sorry <@${userId}>, the transcription timed out. Try again later.`);
-}
-
 app.event("app_mention", async ({ event, say, client }) => {
-  const completion = await llm.chat.completions.create({
-    model: MODEL,
-    tools: TOOLS,
-    tool_choice: "auto",
-    messages: [
-      {
-        role: "system",
-        content: "You are a podcast assistant. If the user provides a URL and asks for a transcript, call the create_transcript tool. Otherwise, reply helpfully in plain text.",
-      },
-      { role: "user", content: event.text },
-    ],
+  const userId = event.user ?? "unknown";
+
+  const result = await runAgent(event.text, (toolName) => {
+    if (toolName === "create_transcript") {
+      say(`Got it! Starting the transcription. This may take a few minutes. <@${userId}>`);
+    }
   });
 
-  const message = completion.choices[0].message;
-
-  // LLM wants to call a tool
-  if (message.tool_calls?.length) {
-    const toolCall = message.tool_calls[0];
-    if (toolCall.type === "function" && toolCall.function.name === "create_transcript") {
-      const { url } = JSON.parse(toolCall.function.arguments) as { url: string };
-      await runTranscription(url, event.user ?? "unknown", event.channel, say, client);
-      return;
-    }
+  if (result.type === "text") {
+    await say(`<@${userId}> ${result.content}`);
+  } else if (result.type === "transcript") {
+    await client.files.uploadV2({
+      channel_id: event.channel,
+      content: JSON.stringify(result.data, null, 2),
+      filename: `transcript-${result.jobId}.json`,
+      initial_comment: `Transcription complete! <@${userId}>`,
+    });
+  } else {
+    await say(`Sorry <@${userId}>, something went wrong: ${result.message}`);
   }
-
-  // Plain text reply
-  const reply = message.content ?? "I'm not sure how to help with that.";
-  await say(`<@${event.user}> ${reply}`);
 });
 
+// ---------- Boot ----------
+
 (async () => {
+  await initMcp();
   await app.start(PORT);
   console.log(`Bot is running on port ${PORT}!`);
 })();
