@@ -15,27 +15,24 @@ The bot will confirm, run the transcription, and post the result as a JSON file 
 The bot connects several services in a pipeline:
 
 ```d2
-direction: right
+shape: sequence_diagram
 
 user: 👤 Slack User
 slack: Slack Platform
 railway: 🚂 Railway (Bolt + TypeScript)
-
-modal: Modal {
-  vllm: ⚡ vLLM Inference\n(Qwen3-8B)
-  transcribe: 🎙️ FastAPI Transcription Server
-}
+vllm: ⚡ vLLM Inference (Qwen3-8B)
+transcribe: 🎙️ FastAPI Transcription Server
 
 user -> slack: "1. @Minion <message>"
 slack -> railway: "2. POST /slack/events"
-railway -> modal.vllm: "3. Chat completion"
-modal.vllm -> railway: "4. tool_call: create_transcript(url)"
-railway -> modal.transcribe: "5. POST /api/transcribe/url"
-modal.transcribe -> railway: "6. job_id"
-railway -> modal.transcribe: "7. poll /api/status/:job_id"
-modal.transcribe -> railway: "8. status: completed"
-railway -> modal.transcribe: "9. GET /api/result/:job_id"
-modal.transcribe -> railway: "10. transcript JSON"
+railway -> vllm: "3. Chat completion"
+vllm -> railway: "4. tool_call: create_transcript(url)"
+railway -> transcribe: "5. POST /api/transcribe/url"
+transcribe -> railway: "6. job_id"
+railway -> transcribe: "7. poll /api/status/:job_id"
+transcribe -> railway: "8. status: completed"
+railway -> transcribe: "9. GET /api/result/:job_id"
+transcribe -> railway: "10. transcript JSON"
 railway -> slack: "11. files.uploadV2 (transcript)"
 slack -> user: "12. 📄 transcript posted"
 ```
