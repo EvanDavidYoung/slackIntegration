@@ -8,7 +8,7 @@ const MODEL = "Qwen/Qwen3-8B";
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
 const llm = new OpenAI({
-  baseURL: "VLLM_BASE_URL_PLACEHOLDER",
+  baseURL: process.env.VLLM_BASE_URL,
   apiKey: process.env.VLLM_API_KEY ?? "",
 });
 
@@ -82,7 +82,11 @@ async function runAgent(
 
   onToolCall?.(toolName);
 
-  const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
+  const result = await mcpClient.callTool(
+    { name: toolName, arguments: toolArgs },
+    undefined,
+    { timeout: 660_000 } // 11 min — covers the 10-min max poll in the MCP server
+  );
   const content = result.content as Array<{ type: string; text?: string }>;
   const resultText = content[0]?.type === "text" ? (content[0].text ?? "") : "";
 

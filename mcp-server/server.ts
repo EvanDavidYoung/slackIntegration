@@ -5,9 +5,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-const TRANSCRIPTION_API_BASE =
-  process.env.TRANSCRIPTION_API_BASE ??
-  "TRANSCRIPTION_API_BASE_PLACEHOLDER";
+const TRANSCRIPTION_API_BASE = process.env.TRANSCRIPTION_API_BASE ?? "";
 const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY ?? "";
 
 const POLL_INTERVAL_MS = 15_000;
