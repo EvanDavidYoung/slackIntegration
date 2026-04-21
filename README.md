@@ -59,7 +59,9 @@ Requires a `.env` file with:
 ```
 SLACK_BOT_TOKEN=
 SLACK_SIGNING_SECRET=
+VLLM_BASE_URL=        # Base URL for vLLM inference endpoint, e.g. https://<host>/v1
 VLLM_API_KEY=
+TRANSCRIPTION_API_BASE=   # Base URL for the FastAPI transcription server
 TRANSCRIPTION_API_KEY=
 ```
 

@@ -1,10 +1,10 @@
-import { App } from "@slack/bolt";
+import { App, ExpressReceiver } from "@slack/bolt";
 import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import path from "path";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import express from "express";
 
-const MODEL = "Qwen/Qwen3-8B";
+const MODEL = "Qwen/Qwen3-VL-8B-Instruct";
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
 const llm = new OpenAI({
@@ -18,14 +18,10 @@ let mcpClient: Client;
 let mcpTools: OpenAI.Chat.ChatCompletionTool[] = [];
 
 async function initMcp() {
-  const serverScript = path.resolve(__dirname, "..", "mcp-server", "server.ts");
-  const tsNode = path.resolve(__dirname, "..", "node_modules", ".bin", "ts-node");
+  const mcpServerUrl = process.env.MCP_SERVER_URL;
+  if (!mcpServerUrl) throw new Error("MCP_SERVER_URL environment variable is required");
 
-  const transport = new StdioClientTransport({
-    command: tsNode,
-    args: [serverScript],
-    env: { ...process.env } as Record<string, string>,
-  });
+  const transport = new StreamableHTTPClientTransport(new URL(mcpServerUrl));
 
   mcpClient = new Client({ name: "slack-bot", version: "1.0.0" });
   await mcpClient.connect(transport);
@@ -43,17 +39,24 @@ async function initMcp() {
   console.log(`MCP ready — tools: ${tools.map((t) => t.name).join(", ")}`);
 }
 
+// ---------- Pending jobs (job_id → Slack context) ----------
+
+interface SlackContext {
+  channelId: string;
+  threadTs: string;
+  userId: string;
+}
+
+const pendingJobs = new Map<string, SlackContext>();
+
 // ---------- Agent ----------
 
 type AgentResult =
   | { type: "text"; content: string }
-  | { type: "transcript"; jobId: string; data: unknown }
+  | { type: "submitted"; jobId: string }
   | { type: "error"; message: string };
 
-async function runAgent(
-  message: string,
-  onToolCall?: (toolName: string) => void
-): Promise<AgentResult> {
+async function runAgent(message: string): Promise<AgentResult> {
   const completion = await llm.chat.completions.create({
     model: MODEL,
     tools: mcpTools,
@@ -62,7 +65,7 @@ async function runAgent(
       {
         role: "system",
         content:
-          "You are a podcast assistant. If the user provides a URL and asks for a transcript, call the create_transcript tool. Otherwise, reply helpfully in plain text.",
+          "You are a podcast assistant. If the user provides a URL and asks for a transcript, call the create_transcript tool. Otherwise, reply helpfully in plain text. /no_think",
       },
       { role: "user", content: message },
     ],
@@ -80,13 +83,7 @@ async function runAgent(
   const toolName = toolCall.function.name;
   const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
 
-  onToolCall?.(toolName);
-
-  const result = await mcpClient.callTool(
-    { name: toolName, arguments: toolArgs },
-    undefined,
-    { timeout: 660_000 } // 11 min — covers the 10-min max poll in the MCP server
-  );
+  const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
   const content = result.content as Array<{ type: string; text?: string }>;
   const resultText = content[0]?.type === "text" ? (content[0].text ?? "") : "";
 
@@ -95,11 +92,8 @@ async function runAgent(
   }
 
   if (toolName === "create_transcript") {
-    const { job_id, transcript } = JSON.parse(resultText) as {
-      job_id: string;
-      transcript: unknown;
-    };
-    return { type: "transcript", jobId: job_id, data: transcript };
+    const { job_id } = JSON.parse(resultText) as { job_id: string };
+    return { type: "submitted", jobId: job_id };
   }
 
   return { type: "text", content: resultText };
@@ -107,29 +101,77 @@ async function runAgent(
 
 // ---------- Slack ----------
 
-const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-});
+const socketMode = process.env.SOCKET_MODE === "true";
 
-app.event("app_mention", async ({ event, say, client }) => {
+let app: App;
+
+if (socketMode) {
+  app = new App({
+    token: process.env.SLACK_BOT_TOKEN,
+    socketMode: true,
+    appToken: process.env.SLACK_APP_TOKEN,
+  });
+} else {
+  const receiver = new ExpressReceiver({
+    signingSecret: process.env.SLACK_SIGNING_SECRET ?? "",
+  });
+
+  receiver.router.post(
+    "/webhook/transcript",
+    express.json(),
+    async (req: express.Request, res: express.Response) => {
+      const { job_id, transcript, error } = req.body as {
+        job_id: string;
+        transcript?: unknown;
+        error?: string;
+      };
+      res.sendStatus(200);
+
+      const ctx = pendingJobs.get(job_id);
+      if (!ctx) {
+        console.error(`[webhook] Unknown job_id: ${job_id}`);
+        return;
+      }
+      pendingJobs.delete(job_id);
+
+      if (error) {
+        await app.client.chat.postMessage({
+          channel: ctx.channelId,
+          thread_ts: ctx.threadTs,
+          text: `Sorry <@${ctx.userId}>, transcription failed: ${error}`,
+        });
+      } else {
+        await app.client.files.uploadV2({
+          channel_id: ctx.channelId,
+          content: JSON.stringify(transcript, null, 2),
+          filename: `transcript-${job_id}.json`,
+          initial_comment: `Transcription complete! <@${ctx.userId}>`,
+        });
+      }
+    }
+  );
+
+  app = new App({
+    token: process.env.SLACK_BOT_TOKEN,
+    receiver,
+  });
+}
+
+app.event("app_mention", async ({ event, say }) => {
+  console.log(`[request] app_mention user=${event.user} channel=${event.channel} ts=${event.ts}`);
   const userId = event.user ?? "unknown";
 
-  const result = await runAgent(event.text, (toolName) => {
-    if (toolName === "create_transcript") {
-      say(`Got it! Starting the transcription. This may take a few minutes. <@${userId}>`);
-    }
-  });
+  const result = await runAgent(event.text);
 
   if (result.type === "text") {
     await say(`<@${userId}> ${result.content}`);
-  } else if (result.type === "transcript") {
-    await client.files.uploadV2({
-      channel_id: event.channel,
-      content: JSON.stringify(result.data, null, 2),
-      filename: `transcript-${result.jobId}.json`,
-      initial_comment: `Transcription complete! <@${userId}>`,
+  } else if (result.type === "submitted") {
+    pendingJobs.set(result.jobId, {
+      channelId: event.channel,
+      threadTs: event.ts,
+      userId,
     });
+    await say(`Got it! I'll notify you when the transcription is complete. <@${userId}>`);
   } else {
     await say(`Sorry <@${userId}>, something went wrong: ${result.message}`);
   }
@@ -139,6 +181,11 @@ app.event("app_mention", async ({ event, say, client }) => {
 
 (async () => {
   await initMcp();
-  await app.start(PORT);
-  console.log(`Bot is running on port ${PORT}!`);
+  if (socketMode) {
+    await app.start();
+    console.log("Bot is running in Socket Mode (dev)");
+  } else {
+    await app.start(PORT);
+    console.log(`Bot is running on port ${PORT}!`);
+  }
 })();
