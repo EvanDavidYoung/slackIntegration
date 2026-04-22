@@ -81,7 +81,7 @@ function createServer() {
       }
 
       const job = (await submitRes.json()) as { job_id: string };
-      console.error(`[mcp-server] Job submitted — id: ${job.job_id}`);
+      console.log(`[mcp-server] Job submitted — id: ${job.job_id}`);
       return {
         isError: false,
         content: [{ type: "text" as const, text: JSON.stringify({ job_id: job.job_id }) }],
@@ -132,7 +132,7 @@ function createServer() {
       }
 
       const job = (await submitRes.json()) as { job_id: string };
-      console.error(`[mcp-server] RSS job submitted — id: ${job.job_id}`);
+      console.log(`[mcp-server] RSS job submitted — id: ${job.job_id}`);
       return {
         isError: false,
         content: [{ type: "text" as const, text: JSON.stringify({ job_id: job.job_id }) }],
@@ -185,4 +185,4 @@ app.delete("/mcp", (_req, res) => {
   );
 });
 
-app.listen(PORT, () => console.error(`[mcp-server] Listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`[mcp-server] Listening on port ${PORT}`));
