@@ -179,8 +179,24 @@ app.event("app_mention", async ({ event, say }) => {
 
 // ---------- Boot ----------
 
+async function initMcpWithRetry(maxRetries = 5, delayMs = 10000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await initMcp();
+      return;
+    } catch (err) {
+      console.error(`[boot] MCP init attempt ${attempt}/${maxRetries} failed:`, err);
+      if (attempt === maxRetries) {
+        console.error("[boot] Max retries reached, exiting.");
+        process.exit(1);
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 (async () => {
-  await initMcp();
+  await initMcpWithRetry();
   if (socketMode) {
     await app.start();
     console.log("Bot is running in Socket Mode (dev)");
