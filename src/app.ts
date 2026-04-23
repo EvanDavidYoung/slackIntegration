@@ -64,7 +64,7 @@ async function runAgent(message: string): Promise<AgentResult> {
     {
       role: "system",
       content:
-        "You are a podcast assistant. You have three tools: (1) search_podcast — search for a podcast by name and get its RSS feed URL; (2) create_transcript_from_rss — transcribe an episode from an RSS feed URL; (3) create_transcript — transcribe a direct audio URL. If the user names a podcast without providing a URL, call search_podcast first, pick the best match, then call create_transcript_from_rss with the feedUrl. If the user provides a direct audio URL, call create_transcript. Otherwise, reply helpfully in plain text. /no_think",
+        "You are a podcast assistant. You have three tools: (1) search_podcast — search for a podcast by name and get its RSS feed URL; (2) create_transcript_from_rss — transcribe an episode from an RSS feed URL; (3) create_transcript — transcribe a direct audio URL. If the user names a podcast without providing a URL, call search_podcast first, pick the best match, then call create_transcript_from_rss with the rss_url, episode_title (the episode name or keywords the user mentioned), and language (infer from the podcast name/episode title: 'zh' for Mandarin/Chinese, 'en' for English, 'ja' for Japanese, etc.). If no specific episode is mentioned, omit episode_title to get the latest. If the user provides a direct audio URL, call create_transcript with the language. Otherwise, reply helpfully in plain text. /no_think",
     },
     { role: "user", content: message },
   ];
@@ -87,9 +87,11 @@ async function runAgent(message: string): Promise<AgentResult> {
     const toolName = toolCall.function.name;
     const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
 
+    console.log(`[agent] iter=${iter} tool=${toolName} args=${JSON.stringify(toolArgs)}`);
     const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
     const content = result.content as Array<{ type: string; text?: string }>;
     const resultText = content[0]?.type === "text" ? (content[0].text ?? "") : "";
+    console.log(`[agent] iter=${iter} tool=${toolName} isError=${result.isError} result=${resultText.slice(0, 300)}`);
 
     if (result.isError) {
       return { type: "error", message: resultText };
