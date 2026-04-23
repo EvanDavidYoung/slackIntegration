@@ -194,14 +194,20 @@ app.event("app_mention", async ({ event, say }) => {
   if (imageFiles.length > 0) {
     const file = imageFiles[0];
     console.log(`[request] image attachment detected: ${file.name} (${file.mimetype})`);
-    const resp = await fetch(file.url_private, {
+    const resp = await fetch(file.url_private_download ?? file.url_private, {
       headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
     });
-    const b64 = Buffer.from(await resp.arrayBuffer()).toString("base64");
-    userContent = [
-      { type: "image_url", image_url: { url: `data:${file.mimetype};base64,${b64}` } },
-      { type: "text", text: event.text || "Extract the podcast name and episode from this screenshot and transcribe it." },
-    ];
+    if (resp.ok) {
+      const contentType = resp.headers.get("content-type") ?? file.mimetype;
+      const b64 = Buffer.from(await resp.arrayBuffer()).toString("base64");
+      userContent = [
+        { type: "image_url", image_url: { url: `data:${contentType};base64,${b64}` } },
+        { type: "text", text: event.text || "Extract the podcast name and episode from this screenshot and transcribe it." },
+      ];
+    } else {
+      console.error(`[request] image fetch failed: ${resp.status} ${resp.statusText} — falling back to text`);
+      userContent = event.text;
+    }
   } else {
     userContent = event.text;
   }
