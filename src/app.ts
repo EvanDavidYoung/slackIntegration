@@ -72,12 +72,17 @@ async function runAgent(message: string): Promise<AgentResult> {
   let listEpisodesCalls = 0;
 
   for (let iter = 0; iter < MAX_AGENT_ITER; iter++) {
-    const completion = await llm.chat.completions.create({
-      model: MODEL,
-      tools: mcpTools,
-      tool_choice: "auto",
-      messages,
-    });
+    let completion: OpenAI.Chat.ChatCompletion;
+    try {
+      completion = await llm.chat.completions.create({
+        model: MODEL,
+        tools: mcpTools,
+        tool_choice: "auto",
+        messages,
+      });
+    } catch (err) {
+      return { type: "error", message: `LLM error: ${(err as Error).message}` };
+    }
 
     const msg = completion.choices[0].message;
 
@@ -184,7 +189,14 @@ app.event("app_mention", async ({ event, say }) => {
   console.log(`[request] app_mention user=${event.user} channel=${event.channel} ts=${event.ts}`);
   const userId = event.user ?? "unknown";
 
-  const result = await runAgent(event.text);
+  let result: AgentResult;
+  try {
+    result = await runAgent(event.text);
+  } catch (err) {
+    console.error(`[app_mention] Unhandled error:`, err);
+    await say(`Sorry <@${userId}>, something went wrong: ${(err as Error).message}`);
+    return;
+  }
 
   if (result.type === "text") {
     await say(`<@${userId}> ${result.content}`);
