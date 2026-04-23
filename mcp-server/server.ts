@@ -27,6 +27,7 @@ function createServer() {
           type: "object",
           properties: {
             url: { type: "string", description: "Direct audio URL to transcribe" },
+            language: { type: "string", description: "BCP-47 language code of the audio (e.g. 'zh' for Mandarin/Chinese, 'en' for English, 'ja' for Japanese). Infer from context if not stated." },
           },
           required: ["url"],
         },
@@ -54,6 +55,7 @@ function createServer() {
             rss_url: { type: "string", description: "RSS feed URL of the podcast" },
             episode_title: { type: "string", description: "Episode title or keywords to search for within the feed (preferred)" },
             episode_index: { type: "number", description: "Fallback positional index (0 = latest). Only used when episode_title is not provided." },
+            language: { type: "string", description: "BCP-47 language code of the audio (e.g. 'zh' for Mandarin/Chinese, 'en' for English, 'ja' for Japanese). Infer from context if not stated." },
           },
           required: ["rss_url"],
         },
@@ -65,8 +67,8 @@ function createServer() {
     console.log(`[mcp-server] tool=${request.params.name} args=${JSON.stringify(request.params.arguments)}`);
 
     if (request.params.name === "create_transcript") {
-      const { url } = request.params.arguments as { url: string };
-      const body = JSON.stringify({ url, callback_url: MCP_CALLBACK_URL });
+      const { url, language } = request.params.arguments as { url: string; language?: string };
+      const body = JSON.stringify({ url, language, callback_url: MCP_CALLBACK_URL });
       console.log(`[mcp-server] POST /api/transcribe/url body=${body}`);
 
       const submitRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/url`, {
@@ -122,8 +124,8 @@ function createServer() {
       };
 
     } else if (request.params.name === "create_transcript_from_rss") {
-      const { rss_url, episode_title, episode_index } = request.params.arguments as { rss_url: string; episode_title?: string; episode_index?: number };
-      const body = JSON.stringify({ rss_url, episode_title, episode_index: episode_index ?? 0, callback_url: MCP_CALLBACK_URL });
+      const { rss_url, episode_title, episode_index, language } = request.params.arguments as { rss_url: string; episode_title?: string; episode_index?: number; language?: string };
+      const body = JSON.stringify({ rss_url, episode_title, episode_index: episode_index ?? 0, language, callback_url: MCP_CALLBACK_URL });
       console.log(`[mcp-server] POST /api/transcribe/rss body=${body}`);
 
       const submitRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/rss`, {
