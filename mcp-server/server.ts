@@ -35,7 +35,7 @@ function createServer() {
       {
         name: "search_podcast",
         description:
-          "Search for podcasts by name using the iTunes Search API. Returns a list of matches with title, author, and rss_url (RSS feed URL for the whole series). To transcribe a specific episode, pass rss_url to create_transcript_from_rss along with an episode_index (0 = latest episode, 1 = second-latest, etc.).",
+          "Search for podcasts by name using the iTunes Search API. Returns a list of matches with title, author, rss_url, and podcast_id. Use podcast_id with list_episodes to browse episodes, or rss_url with create_transcript_from_rss for the latest episode.",
         inputSchema: {
           type: "object",
           properties: {
@@ -46,16 +46,28 @@ function createServer() {
         },
       },
       {
+        name: "list_episodes",
+        description:
+          "Fetch up to 50 episodes from a podcast via iTunes by podcast_id. Returns index, title, date, and audio_url per episode. Use offset=50, 100 for older episodes.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            podcast_id: { type: "number", description: "iTunes collection ID from search_podcast" },
+            offset: { type: "number", description: "Pagination offset (0, 50, 100). Default 0." },
+          },
+          required: ["podcast_id"],
+        },
+      },
+      {
         name: "create_transcript_from_rss",
         description:
-          "Submit a podcast RSS feed for transcription. Prefer episode_title to find an episode by name. Falls back to episode_index (0 = latest) if episode_title is omitted. Returns a job_id immediately; result delivered via webhook when complete.",
+          "Transcribe an episode by position from an RSS feed. episode_index 0 = latest, 1 = second-latest, etc. Reliable for the last 20 episodes only — for older episodes use list_episodes + create_transcript instead. Returns a job_id immediately; result delivered via webhook when complete.",
         inputSchema: {
           type: "object",
           properties: {
             rss_url: { type: "string", description: "RSS feed URL of the podcast" },
-            episode_title: { type: "string", description: "Episode title or keywords to search for within the feed (preferred)" },
-            episode_index: { type: "number", description: "Fallback positional index (0 = latest). Only used when episode_title is not provided." },
-            language: { type: "string", description: "BCP-47 language code of the audio (e.g. 'zh' for Mandarin/Chinese, 'en' for English, 'ja' for Japanese). Infer from context if not stated." },
+            episode_index: { type: "number", description: "Episode index (0 = latest, 1 = second-latest, etc.)." },
+            language: { type: "string", description: "BCP-47 language code (e.g. 'zh', 'en', 'ja'). Infer from context." },
           },
           required: ["rss_url"],
         },
@@ -111,11 +123,11 @@ function createServer() {
       }
 
       const data = (await searchRes.json()) as {
-        results: Array<{ collectionName: string; artistName: string; feedUrl?: string }>;
+        results: Array<{ collectionId: number; collectionName: string; artistName: string; feedUrl?: string }>;
       };
       const podcasts = data.results
         .filter((r) => r.feedUrl)
-        .map((r) => ({ title: r.collectionName, author: r.artistName, rss_url: r.feedUrl }));
+        .map((r) => ({ title: r.collectionName, author: r.artistName, rss_url: r.feedUrl, podcast_id: r.collectionId }));
 
       console.log(`[mcp-server] search_podcast results: ${JSON.stringify(podcasts)}`);
       return {
@@ -123,9 +135,41 @@ function createServer() {
         content: [{ type: "text" as const, text: JSON.stringify(podcasts) }],
       };
 
+    } else if (request.params.name === "list_episodes") {
+      const { podcast_id, offset } = request.params.arguments as { podcast_id: number; offset?: number };
+      const effectiveOffset = offset ?? 0;
+      const lookupUrl = `https://itunes.apple.com/lookup?id=${podcast_id}&entity=podcastEpisode&limit=50&offset=${effectiveOffset}`;
+      console.log(`[mcp-server] iTunes episode lookup: ${lookupUrl}`);
+
+      const lookupRes = await fetch(lookupUrl);
+      if (!lookupRes.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `iTunes lookup failed: ${lookupRes.status} ${lookupRes.statusText}` }],
+        };
+      }
+
+      const data = (await lookupRes.json()) as {
+        results: Array<{ wrapperType: string; trackName?: string; releaseDate?: string; episodeUrl?: string }>;
+      };
+      const episodes = data.results
+        .filter((r) => r.wrapperType === "podcastEpisode")
+        .map((r, i) => ({
+          index: effectiveOffset + i,
+          title: r.trackName ?? "",
+          date: r.releaseDate ?? "",
+          audio_url: r.episodeUrl ?? "",
+        }));
+
+      console.log(`[mcp-server] list_episodes offset=${effectiveOffset} count=${episodes.length}`);
+      return {
+        isError: false,
+        content: [{ type: "text" as const, text: JSON.stringify(episodes) }],
+      };
+
     } else if (request.params.name === "create_transcript_from_rss") {
-      const { rss_url, episode_title, episode_index, language } = request.params.arguments as { rss_url: string; episode_title?: string; episode_index?: number; language?: string };
-      const body = JSON.stringify({ rss_url, episode_title, episode_index: episode_index ?? 0, language, callback_url: MCP_CALLBACK_URL });
+      const { rss_url, episode_index, language } = request.params.arguments as { rss_url: string; episode_index?: number; language?: string };
+      const body = JSON.stringify({ rss_url, episode_index: episode_index ?? 0, language, callback_url: MCP_CALLBACK_URL });
       console.log(`[mcp-server] POST /api/transcribe/rss body=${body}`);
 
       const submitRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/rss`, {
