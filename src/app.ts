@@ -56,47 +56,59 @@ type AgentResult =
   | { type: "submitted"; jobId: string }
   | { type: "error"; message: string };
 
+const TERMINAL_TOOLS = new Set(["create_transcript", "create_transcript_from_rss"]);
+const MAX_AGENT_ITER = 10;
+
 async function runAgent(message: string): Promise<AgentResult> {
-  const completion = await llm.chat.completions.create({
-    model: MODEL,
-    tools: mcpTools,
-    tool_choice: "auto",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a podcast assistant. If the user provides a URL and asks for a transcript, call the create_transcript tool. Otherwise, reply helpfully in plain text. /no_think",
-      },
-      { role: "user", content: message },
-    ],
-  });
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    {
+      role: "system",
+      content:
+        "You are a podcast assistant. You have three tools: (1) search_podcast — search for a podcast by name and get its RSS feed URL; (2) create_transcript_from_rss — transcribe an episode from an RSS feed URL; (3) create_transcript — transcribe a direct audio URL. If the user names a podcast without providing a URL, call search_podcast first, pick the best match, then call create_transcript_from_rss with the feedUrl. If the user provides a direct audio URL, call create_transcript. Otherwise, reply helpfully in plain text. /no_think",
+    },
+    { role: "user", content: message },
+  ];
 
-  const msg = completion.choices[0].message;
+  for (let iter = 0; iter < MAX_AGENT_ITER; iter++) {
+    const completion = await llm.chat.completions.create({
+      model: MODEL,
+      tools: mcpTools,
+      tool_choice: "auto",
+      messages,
+    });
 
-  if (!msg.tool_calls?.length) {
-    return { type: "text", content: msg.content ?? "I'm not sure how to help with that." };
+    const msg = completion.choices[0].message;
+
+    if (!msg.tool_calls?.length) {
+      return { type: "text", content: msg.content ?? "I'm not sure how to help with that." };
+    }
+
+    const toolCall = msg.tool_calls[0] as { id: string; function: { name: string; arguments: string } };
+    const toolName = toolCall.function.name;
+    const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+
+    const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
+    const content = result.content as Array<{ type: string; text?: string }>;
+    const resultText = content[0]?.type === "text" ? (content[0].text ?? "") : "";
+
+    if (result.isError) {
+      return { type: "error", message: resultText };
+    }
+
+    if (TERMINAL_TOOLS.has(toolName)) {
+      const { job_id } = JSON.parse(resultText) as { job_id: string };
+      return { type: "submitted", jobId: job_id };
+    }
+
+    messages.push(msg);
+    messages.push({
+      role: "tool",
+      tool_call_id: toolCall.id,
+      content: resultText,
+    });
   }
 
-  const toolCall = msg.tool_calls[0] as {
-    function: { name: string; arguments: string };
-  };
-  const toolName = toolCall.function.name;
-  const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
-
-  const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
-  const content = result.content as Array<{ type: string; text?: string }>;
-  const resultText = content[0]?.type === "text" ? (content[0].text ?? "") : "";
-
-  if (result.isError) {
-    return { type: "error", message: resultText };
-  }
-
-  if (toolName === "create_transcript") {
-    const { job_id } = JSON.parse(resultText) as { job_id: string };
-    return { type: "submitted", jobId: job_id };
-  }
-
-  return { type: "text", content: resultText };
+  return { type: "error", message: "Agent reached maximum iterations without completing." };
 }
 
 // ---------- Slack ----------
