@@ -59,25 +59,30 @@ type AgentResult =
 const TERMINAL_TOOLS = new Set(["create_transcript", "create_transcript_from_rss"]);
 const MAX_AGENT_ITER = 10;
 
-async function runAgent(message: string): Promise<AgentResult> {
+async function runAgent(userContent: string | OpenAI.Chat.ChatCompletionContentPart[]): Promise<AgentResult> {
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     {
       role: "system",
       content:
-        "You are a podcast assistant with four tools: (1) search_podcast — returns podcast matches with podcast_id and rss_url; (2) list_episodes — fetches up to 50 episodes by podcast_id with title, date, audio_url; use offset=50/100 for older episodes; (3) create_transcript — transcribes a direct audio URL; use after list_episodes; (4) create_transcript_from_rss — transcribes an episode by position from an RSS feed, reliable for the last 20 episodes. Specific episode: search_podcast → list_episodes → pick best title match → create_transcript(audio_url, language). Latest episode: search_podcast → create_transcript_from_rss(rss_url, language). Direct URL: create_transcript(url, language). Infer language from context: zh=Mandarin, en=English, ja=Japanese, etc. /no_think",
+        "You are a podcast assistant with four tools: (1) search_podcast — returns podcast matches with podcast_id and rss_url; (2) list_episodes — fetches up to 50 episodes by podcast_id with title, date, audio_url; use offset=50/100 for older episodes; (3) create_transcript — transcribes a direct audio URL; use after list_episodes; (4) create_transcript_from_rss — transcribes an episode by position from an RSS feed, reliable for the last 20 episodes. Specific episode: search_podcast → list_episodes → pick best title match → create_transcript(audio_url, language). Latest episode: search_podcast → create_transcript_from_rss(rss_url, language). Direct URL: create_transcript(url, language). Infer language from context: zh=Mandarin, en=English, ja=Japanese, etc. If the user provides a screenshot or image, look at it and extract the podcast name and episode title visible in the image, then use search_podcast + create_transcript_from_rss to find and transcribe it. /no_think",
     },
-    { role: "user", content: message },
+    { role: "user", content: userContent },
   ];
 
   let listEpisodesCalls = 0;
 
   for (let iter = 0; iter < MAX_AGENT_ITER; iter++) {
-    const completion = await llm.chat.completions.create({
-      model: MODEL,
-      tools: mcpTools,
-      tool_choice: "auto",
-      messages,
-    });
+    let completion: OpenAI.Chat.ChatCompletion;
+    try {
+      completion = await llm.chat.completions.create({
+        model: MODEL,
+        tools: mcpTools,
+        tool_choice: "auto",
+        messages,
+      });
+    } catch (err) {
+      return { type: "error", message: `LLM error: ${(err as Error).message}` };
+    }
 
     const msg = completion.choices[0].message;
 
@@ -141,7 +146,7 @@ if (socketMode) {
 
   receiver.router.post(
     "/webhook/transcript",
-    express.json(),
+    express.json({ limit: "50mb" }),
     async (req: express.Request, res: express.Response) => {
       const { job_id, transcript, error } = req.body as {
         job_id: string;
@@ -184,7 +189,31 @@ app.event("app_mention", async ({ event, say }) => {
   console.log(`[request] app_mention user=${event.user} channel=${event.channel} ts=${event.ts}`);
   const userId = event.user ?? "unknown";
 
-  const result = await runAgent(event.text);
+  const imageFiles = (event.files ?? []).filter((f) => f.mimetype.startsWith("image/"));
+  let userContent: string | OpenAI.Chat.ChatCompletionContentPart[];
+  if (imageFiles.length > 0) {
+    const file = imageFiles[0];
+    console.log(`[request] image attachment detected: ${file.name} (${file.mimetype})`);
+    const resp = await fetch(file.url_private, {
+      headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
+    });
+    const b64 = Buffer.from(await resp.arrayBuffer()).toString("base64");
+    userContent = [
+      { type: "image_url", image_url: { url: `data:${file.mimetype};base64,${b64}` } },
+      { type: "text", text: event.text || "Extract the podcast name and episode from this screenshot and transcribe it." },
+    ];
+  } else {
+    userContent = event.text;
+  }
+
+  let result: AgentResult;
+  try {
+    result = await runAgent(userContent);
+  } catch (err) {
+    console.error(`[app_mention] Unhandled error:`, err);
+    await say(`Sorry <@${userId}>, something went wrong: ${(err as Error).message}`);
+    return;
+  }
 
   if (result.type === "text") {
     await say(`<@${userId}> ${result.content}`);
