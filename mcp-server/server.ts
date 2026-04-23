@@ -48,7 +48,7 @@ function createServer() {
       {
         name: "list_episodes",
         description:
-          "Fetch up to 50 episodes from a podcast via the iTunes API. Returns each episode's index, title, date, and audio_url. Call with offset=0 first; if the episode isn't found, call again with offset=50, then offset=100 (at most 3 calls total). Pick the matching episode and pass its audio_url to create_transcript.",
+          "Fetch up to 50 episodes from a podcast via iTunes by podcast_id. Returns index, title, date, and audio_url per episode. Use offset=50, 100 for older episodes.",
         inputSchema: {
           type: "object",
           properties: {
@@ -61,7 +61,7 @@ function createServer() {
       {
         name: "create_transcript_from_rss",
         description:
-          "Submit the latest podcast episode for transcription directly from an RSS feed URL. Use only for 'latest episode' requests. Returns a job_id immediately; result delivered via webhook when complete.",
+          "Transcribe an episode by position from an RSS feed. episode_index 0 = latest, 1 = second-latest, etc. Reliable for the last 20 episodes only — for older episodes use list_episodes + create_transcript instead. Returns a job_id immediately; result delivered via webhook when complete.",
         inputSchema: {
           type: "object",
           properties: {

@@ -64,10 +64,12 @@ async function runAgent(message: string): Promise<AgentResult> {
     {
       role: "system",
       content:
-        "You are a podcast assistant with four tools: (1) search_podcast — returns podcast matches with podcast_id and rss_url; (2) list_episodes — fetches up to 50 episodes by podcast_id with title, date, audio_url; use offset=50/100 for older episodes; (3) create_transcript — transcribes a direct audio URL; use after list_episodes; (4) create_transcript_from_rss — transcribes the latest episode from an RSS feed (use only for 'latest episode' requests). Specific episode: search_podcast → list_episodes (up to 3 times with offset=0/50/100) → pick best title match → create_transcript(audio_url, language). If not found after 3 pages, tell the user and ask for a direct audio URL. Latest episode: search_podcast → create_transcript_from_rss(rss_url, language). Tell the user you're defaulting to the latest episode. Direct URL: create_transcript(url, language). Infer language from context: zh=Mandarin, en=English, ja=Japanese, etc. /no_think",
+        "You are a podcast assistant with four tools: (1) search_podcast — returns podcast matches with podcast_id and rss_url; (2) list_episodes — fetches up to 50 episodes by podcast_id with title, date, audio_url; use offset=50/100 for older episodes; (3) create_transcript — transcribes a direct audio URL; use after list_episodes; (4) create_transcript_from_rss — transcribes an episode by position from an RSS feed, reliable for the last 20 episodes. Specific episode: search_podcast → list_episodes → pick best title match → create_transcript(audio_url, language). Latest episode: search_podcast → create_transcript_from_rss(rss_url, language). Direct URL: create_transcript(url, language). Infer language from context: zh=Mandarin, en=English, ja=Japanese, etc. /no_think",
     },
     { role: "user", content: message },
   ];
+
+  let listEpisodesCalls = 0;
 
   for (let iter = 0; iter < MAX_AGENT_ITER; iter++) {
     const completion = await llm.chat.completions.create({
@@ -86,6 +88,13 @@ async function runAgent(message: string): Promise<AgentResult> {
     const toolCall = msg.tool_calls[0] as { id: string; function: { name: string; arguments: string } };
     const toolName = toolCall.function.name;
     const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+
+    if (toolName === "list_episodes") {
+      listEpisodesCalls++;
+      if (listEpisodesCalls > 3) {
+        return { type: "text", content: "I couldn't find that episode in the first 150 results. Could you provide a direct audio URL?" };
+      }
+    }
 
     console.log(`[agent] iter=${iter} tool=${toolName} args=${JSON.stringify(toolArgs)}`);
     const result = await mcpClient.callTool({ name: toolName, arguments: toolArgs });
