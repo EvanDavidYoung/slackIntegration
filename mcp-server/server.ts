@@ -47,12 +47,13 @@ function createServer() {
       {
         name: "create_transcript_from_rss",
         description:
-          "Submit a podcast RSS feed for transcription. Defaults to the latest episode (index 0). Returns a job_id immediately; result delivered via webhook when complete.",
+          "Submit a podcast RSS feed for transcription. Prefer episode_title to find an episode by name. Falls back to episode_index (0 = latest) if episode_title is omitted. Returns a job_id immediately; result delivered via webhook when complete.",
         inputSchema: {
           type: "object",
           properties: {
             rss_url: { type: "string", description: "RSS feed URL of the podcast" },
-            episode_index: { type: "number", description: "Episode index (0 = latest). Defaults to 0." },
+            episode_title: { type: "string", description: "Episode title or keywords to search for within the feed (preferred)" },
+            episode_index: { type: "number", description: "Fallback positional index (0 = latest). Only used when episode_title is not provided." },
           },
           required: ["rss_url"],
         },
@@ -121,8 +122,8 @@ function createServer() {
       };
 
     } else if (request.params.name === "create_transcript_from_rss") {
-      const { rss_url, episode_index } = request.params.arguments as { rss_url: string; episode_index?: number };
-      const body = JSON.stringify({ rss_url, episode_index: episode_index ?? 0, callback_url: MCP_CALLBACK_URL });
+      const { rss_url, episode_title, episode_index } = request.params.arguments as { rss_url: string; episode_title?: string; episode_index?: number };
+      const body = JSON.stringify({ rss_url, episode_title, episode_index: episode_index ?? 0, callback_url: MCP_CALLBACK_URL });
       console.log(`[mcp-server] POST /api/transcribe/rss body=${body}`);
 
       const submitRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/rss`, {
