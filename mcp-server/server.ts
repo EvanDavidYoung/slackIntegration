@@ -34,7 +34,7 @@ function createServer() {
       {
         name: "search_podcast",
         description:
-          "Search for podcasts by name using the iTunes Search API. Returns a list of matches with title, author, and feedUrl (RSS feed URL for the whole series). To transcribe a specific episode, pass feedUrl to create_transcript_from_rss along with an episode_index (0 = latest episode, 1 = second-latest, etc.).",
+          "Search for podcasts by name using the iTunes Search API. Returns a list of matches with title, author, and rss_url (RSS feed URL for the whole series). To transcribe a specific episode, pass rss_url to create_transcript_from_rss along with an episode_index (0 = latest episode, 1 = second-latest, etc.).",
         inputSchema: {
           type: "object",
           properties: {
@@ -61,8 +61,12 @@ function createServer() {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    console.log(`[mcp-server] tool=${request.params.name} args=${JSON.stringify(request.params.arguments)}`);
+
     if (request.params.name === "create_transcript") {
       const { url } = request.params.arguments as { url: string };
+      const body = JSON.stringify({ url, callback_url: MCP_CALLBACK_URL });
+      console.log(`[mcp-server] POST /api/transcribe/url body=${body}`);
 
       const submitRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/url`, {
         method: "POST",
@@ -70,13 +74,15 @@ function createServer() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${TRANSCRIPTION_API_KEY}`,
         },
-        body: JSON.stringify({ url, callback_url: MCP_CALLBACK_URL }),
+        body,
       });
 
       if (!submitRes.ok) {
+        const errorBody = await submitRes.text();
+        console.error(`[mcp-server] /api/transcribe/url failed ${submitRes.status}: ${errorBody}`);
         return {
           isError: true,
-          content: [{ type: "text" as const, text: `Failed to submit job: ${submitRes.status} ${submitRes.statusText}` }],
+          content: [{ type: "text" as const, text: `Failed to submit job: ${submitRes.status} ${submitRes.statusText} — ${errorBody}` }],
         };
       }
 
@@ -91,6 +97,7 @@ function createServer() {
       const { query, limit } = request.params.arguments as { query: string; limit?: number };
       const effectiveLimit = Math.min(limit ?? 5, 20);
       const searchUrl = `https://itunes.apple.com/search?media=podcast&entity=podcast&term=${encodeURIComponent(query)}&limit=${effectiveLimit}`;
+      console.log(`[mcp-server] iTunes search: ${searchUrl}`);
 
       const searchRes = await fetch(searchUrl);
       if (!searchRes.ok) {
@@ -105,8 +112,9 @@ function createServer() {
       };
       const podcasts = data.results
         .filter((r) => r.feedUrl)
-        .map((r) => ({ title: r.collectionName, author: r.artistName, feedUrl: r.feedUrl }));
+        .map((r) => ({ title: r.collectionName, author: r.artistName, rss_url: r.feedUrl }));
 
+      console.log(`[mcp-server] search_podcast results: ${JSON.stringify(podcasts)}`);
       return {
         isError: false,
         content: [{ type: "text" as const, text: JSON.stringify(podcasts) }],
@@ -114,6 +122,8 @@ function createServer() {
 
     } else if (request.params.name === "create_transcript_from_rss") {
       const { rss_url, episode_index } = request.params.arguments as { rss_url: string; episode_index?: number };
+      const body = JSON.stringify({ rss_url, episode_index: episode_index ?? 0, callback_url: MCP_CALLBACK_URL });
+      console.log(`[mcp-server] POST /api/transcribe/rss body=${body}`);
 
       const submitRes = await fetch(`${TRANSCRIPTION_API_BASE}/api/transcribe/rss`, {
         method: "POST",
@@ -121,13 +131,15 @@ function createServer() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${TRANSCRIPTION_API_KEY}`,
         },
-        body: JSON.stringify({ rss_url, episode_index: episode_index ?? 0, callback_url: MCP_CALLBACK_URL }),
+        body,
       });
 
       if (!submitRes.ok) {
+        const errorBody = await submitRes.text();
+        console.error(`[mcp-server] /api/transcribe/rss failed ${submitRes.status}: ${errorBody}`);
         return {
           isError: true,
-          content: [{ type: "text" as const, text: `Failed to submit RSS job: ${submitRes.status} ${submitRes.statusText}` }],
+          content: [{ type: "text" as const, text: `Failed to submit RSS job: ${submitRes.status} ${submitRes.statusText} — ${errorBody}` }],
         };
       }
 
